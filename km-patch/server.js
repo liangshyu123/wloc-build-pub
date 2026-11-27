@@ -1280,7 +1280,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/site' && req.method === 'GET') {
       // 公开：客户端启动时拉取展示配置（不含任何密钥）
       const s = S(), site = s.site || {};
-      const appCfg = (q.appKey && (s.apps || []).find((a) => a.appKey === q.appKey)) || null;
+      const appCfg = (q.appKey && (store.s.apps || []).find((a) => a.appKey === q.appKey)) || null;
       const pop = (appCfg && appCfg.popup) || {};
       return ok(res, { data: {
         siteName: s.siteName || '卡密验证',
