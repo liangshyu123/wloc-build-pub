@@ -1,0 +1,66 @@
+workflows:
+  wloc-unsigned:
+    name: wloc unsigned IPA
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      xcode: 15.4
+      cocoapods: default
+      vars:
+        OPENSSL3_BIN: /opt/homebrew/opt/openssl@3/bin
+
+    scripts:
+      - name: 生成代理证书
+        script: |
+          set -euo pipefail
+          # p12 必须走 legacy(3DES/SHA1)，否则 iOS 的 SecPKCS12Import 报 -25293。
+          # 优先 OpenSSL 3（需 -legacy 开关）；镜像里没有就现场装一个，
+          # 实在装不上再退回系统 LibreSSL —— 脚本内部已按能力探测降级。
+          if [ -x "$OPENSSL3_BIN/openssl" ]; then
+            export PATH="$OPENSSL3_BIN:$PATH"
+          elif command -v brew >/dev/null 2>&1; then
+            brew install openssl@3 >/dev/null 2>&1 || true
+            if [ -x "$OPENSSL3_BIN/openssl" ]; then export PATH="$OPENSSL3_BIN:$PATH"; fi
+          fi
+          openssl version
+          chmod +x ./generate_apple_wloc_p12.sh
+          ./generate_apple_wloc_p12.sh --platform ios --force
+          ls -l Resources/iOS/AppWLocRootCA.cer Resources/iOS/AppWLocProxy.p12 Resources/Tunnel/AppWLocProxy.p12
+
+      - name: 安装 Pods
+        script: |
+          set -e
+          pod install --repo-update || pod install
+
+      - name: 编译
+        script: |
+          set -o pipefail
+          xcodebuild -workspace WLocApp.xcworkspace -scheme WLocApp-iOS \
+            -configuration Release -sdk iphoneos -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" PROVISIONING_PROFILE_SPECIFIER="" \
+            | tail -120
+
+      - name: 打 entitlements + 打包 IPA
+        script: |
+          set -euo pipefail
+          APP="$(ls -d build/Build/Products/Release-iphoneos/*.app | head -1)"
+          echo "APP=$APP"
+          test -d "$APP/PlugIns/WLocTunnel-iOS.appex" && echo "隧道扩展 ✓"
+
+          command -v ldid >/dev/null 2>&1 || brew install ldid
+          EXEC="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")"
+          ldid -S"Resources/iOS/WLocApp-iOS.entitlements" "$APP/$EXEC"
+          for APPEX in "$APP"/PlugIns/*.appex; do
+            [ -d "$APPEX" ] || continue
+            E="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APPEX/Info.plist")"
+            ldid -S"Resources/Tunnel/WLocTunnel-iOS.entitlements" "$APPEX/$E"
+          done
+
+          rm -rf Payload && mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry wloc-ipa.ipa Payload
+          ls -lh wloc-ipa.ipa
+
+    artifacts:
+      - wloc-ipa.ipa

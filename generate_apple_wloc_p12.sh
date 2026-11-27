@@ -1,0 +1,262 @@
+#!/bin/bash
+
+set -euo pipefail
+
+# 生成应用本地代理需要的证书文件。
+# 产物包含：
+# 1. 根证书：安装到 iPhone 后，需要在“设置 -> 通用 -> 关于本机 -> 证书信任设置”里手动完全信任。
+# 2. 服务端 p12：内置到 Packet Tunnel 扩展资源里，用于代理 gs-loc 的 TLS 握手。
+# 3. 服务端私钥：只用于生成 p12，p12 已经包含该私钥；运行时不需要单独导入 .key 文件。
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLATFORM="ios"
+OUTPUT_DIR=""
+P12_PASSWORD="1"
+FORCE_WRITE=1
+COPY_APP_RESOURCES=1
+
+# 说明平台选项，避免把两套证书同步到同一个 App。
+print_usage() {
+  echo "用法：$0 [选项]"
+  echo ""
+  echo "选项："
+  echo "  --platform ios|macos   生成指定平台的独立证书，默认：ios"
+  echo "  -o, --output DIR       证书输出目录，默认：app_wloc_certs/平台名"
+  echo "  -p, --password PASS    p12 密码，默认：$P12_PASSWORD"
+  echo "  -f, --force            如果输出目录已有文件，允许覆盖（默认行为）"
+  echo "  --no-overwrite         如果输出目录已有文件，直接退出"
+  echo "  --no-app-copy          不把证书同步到 App/Extension 资源目录"
+  echo "  -h, --help             显示帮助"
+  echo ""
+  echo "示例："
+  echo "  $0 --password 123456"
+  echo "  $0 --output /tmp/wloc-certs --password 123456 --force"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --platform)
+      PLATFORM="$2"
+      shift 2
+      ;;
+    -o|--output)
+      OUTPUT_DIR="$2"
+      shift 2
+      ;;
+    -p|--password)
+      P12_PASSWORD="$2"
+      shift 2
+      ;;
+    -f|--force)
+      FORCE_WRITE=1
+      shift
+      ;;
+    --no-overwrite)
+      FORCE_WRITE=0
+      shift
+      ;;
+    --no-app-copy)
+      COPY_APP_RESOURCES=0
+      shift
+      ;;
+    -h|--help)
+      print_usage
+      exit 0
+      ;;
+    *)
+      echo "未知参数：$1"
+      print_usage
+      exit 1
+      ;;
+  esac
+done
+
+case "$PLATFORM" in
+  ios) CERTIFICATE_BRAND="Software iOS App" ;;
+  macos) CERTIFICATE_BRAND="Software" ;;
+  *) echo "不支持的平台：$PLATFORM（仅支持 ios、macos）"; exit 1 ;;
+esac
+OUTPUT_DIR="${OUTPUT_DIR:-$SCRIPT_DIR/app_wloc_certs/$PLATFORM}"
+
+if ! command -v openssl >/dev/null 2>&1; then
+  echo "错误：未找到 openssl，请先安装或确认系统 PATH。"
+  exit 1
+fi
+
+ROOT_KEY="$OUTPUT_DIR/AppWLocRootCA.key"
+ROOT_CERT_PEM="$OUTPUT_DIR/AppWLocRootCA.pem"
+ROOT_CERT_CER="$OUTPUT_DIR/AppWLocRootCA.cer"
+SERVER_KEY="$OUTPUT_DIR/AppWLocProxy.key"
+SERVER_CSR="$OUTPUT_DIR/AppWLocProxy.csr"
+SERVER_CERT="$OUTPUT_DIR/AppWLocProxy.pem"
+SERVER_P12="$OUTPUT_DIR/AppWLocProxy.p12"
+OPENSSL_CONF="$OUTPUT_DIR/app_wloc_openssl.cnf"
+
+if [[ -d "$OUTPUT_DIR" && "$FORCE_WRITE" -ne 1 ]]; then
+  if [[ -n "$(ls -A "$OUTPUT_DIR" 2>/dev/null)" ]]; then
+    echo "错误：输出目录已有文件：$OUTPUT_DIR"
+    echo "如需覆盖，请添加 --force。"
+    exit 1
+  fi
+fi
+
+mkdir -p "$OUTPUT_DIR"
+
+# 失败时显示 OpenSSL 原始错误，成功时不输出生成过程。
+run_quiet() {
+  local description="$1"
+  shift
+  local log_file="$OUTPUT_DIR/openssl_error.log"
+  if ! "$@" >"$log_file" 2>&1; then
+    echo "错误：$description 失败。"
+    echo "OpenSSL 输出："
+    cat "$log_file"
+    exit 1
+  fi
+  rm -f "$log_file"
+}
+
+cat > "$OPENSSL_CONF" <<EOF
+[ req ]
+default_bits = 2048
+prompt = no
+default_md = sha256
+distinguished_name = dn
+req_extensions = server_req
+
+[ dn ]
+C = CN
+O = $CERTIFICATE_BRAND
+OU = $CERTIFICATE_BRAND Proxy
+CN = gs-loc.apple.com
+
+[ root_ca ]
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always,issuer
+basicConstraints = critical, CA:true
+keyUsage = critical, digitalSignature, keyCertSign, cRLSign
+
+[ server_req ]
+subjectAltName = @alt_names
+
+[ server_cert ]
+basicConstraints = critical, CA:false
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = @alt_names
+
+[ alt_names ]
+DNS.1 = gs-loc.apple.com
+DNS.2 = gs-loc-cn.apple.com
+EOF
+
+echo "开始生成 $CERTIFICATE_BRAND 证书..."
+echo "输出目录：$OUTPUT_DIR"
+
+# 生成根证书。根证书只用于本机测试环境，私钥请不要外发。
+run_quiet "生成根证书私钥" openssl genrsa -out "$ROOT_KEY" 2048
+run_quiet "生成根证书" openssl req \
+  -x509 \
+  -new \
+  -nodes \
+  -key "$ROOT_KEY" \
+  -sha256 \
+  -days 3650 \
+  -out "$ROOT_CERT_PEM" \
+  -subj "/C=CN/O=$CERTIFICATE_BRAND/OU=$CERTIFICATE_BRAND Proxy/CN=$CERTIFICATE_BRAND Root CA" \
+  -extensions root_ca \
+  -config "$OPENSSL_CONF"
+
+# iOS 安装根证书时，.cer 文件更方便直接分享或 AirDrop。
+run_quiet "导出根证书 CER" openssl x509 -in "$ROOT_CERT_PEM" -outform DER -out "$ROOT_CERT_CER"
+
+# 生成服务端证书，并加入两个定位服务域名的 SAN。
+run_quiet "生成服务端私钥" openssl genrsa -out "$SERVER_KEY" 2048
+run_quiet "生成服务端 CSR" openssl req \
+  -new \
+  -key "$SERVER_KEY" \
+  -out "$SERVER_CSR" \
+  -config "$OPENSSL_CONF"
+run_quiet "签发服务端证书" openssl x509 \
+  -req \
+  -in "$SERVER_CSR" \
+  -CA "$ROOT_CERT_PEM" \
+  -CAkey "$ROOT_KEY" \
+  -CAcreateserial \
+  -out "$SERVER_CERT" \
+  -days 825 \
+  -sha256 \
+  -extensions server_cert \
+  -extfile "$OPENSSL_CONF"
+
+# p12 是 App 内导入的文件，密码要和 UI 里保存的密码一致。
+# 使用 legacy PBE/MAC，避免 iOS 16 的 SecPKCS12Import 无法解析 OpenSSL 3
+# 默认的 PBES2/AES/SHA256 p12 并返回 errSecAuthFailed(-25293)。
+#
+# 兼容性说明（重要，CI 上踩过坑）：
+#   - OpenSSL 3 需要 -legacy 才会启用 3DES/SHA1 这类 legacy 算法；
+#   - macOS 自带的 LibreSSL 默认就是 legacy，但它**不认** -legacy 这个开关，
+#     传了会直接报 "unknown option"；
+#   - 老一点的 LibreSSL 也没有 -macalg。
+# 所以下面按「能力探测 + 逐级降级」调用，任何一套 openssl 都能出 legacy p12。
+P12_FLAGS=(-export)
+if openssl pkcs12 -help 2>&1 | grep -q -- '-legacy'; then
+  P12_FLAGS+=(-legacy)
+fi
+P12_FLAGS+=(-inkey "$SERVER_KEY" -in "$SERVER_CERT" -certfile "$ROOT_CERT_PEM"
+           -out "$SERVER_P12" -name "$CERTIFICATE_BRAND Proxy"
+           -caname "$CERTIFICATE_BRAND Root CA")
+
+p12_export() {
+  openssl pkcs12 "${P12_FLAGS[@]}" "$@" -passout "pass:$P12_PASSWORD"
+}
+
+if p12_export -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1 >/dev/null 2>&1; then
+  echo "  p12：legacy 3DES/SHA1 已生成"
+elif p12_export -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES >/dev/null 2>&1; then
+  echo "  p12：legacy 3DES（无 -macalg）已生成"
+elif p12_export >/dev/null 2>&1; then
+  echo "  p12：用当前 openssl 默认算法生成（若 iOS 端报 -25293，请换带 legacy 的 OpenSSL 3）"
+else
+  run_quiet "生成 p12" p12_export -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1
+fi
+
+if [[ "$COPY_APP_RESOURCES" -eq 1 ]]; then
+  # 每个平台使用自己的根证书与私钥，不覆盖另一平台的证书。
+  RESOURCE_PLATFORM="iOS"
+  if [[ "$PLATFORM" == "macos" ]]; then RESOURCE_PLATFORM="macOS"; fi
+  mkdir -p "$SCRIPT_DIR/Resources/$RESOURCE_PLATFORM"
+  cp "$ROOT_CERT_CER" "$SCRIPT_DIR/Resources/$RESOURCE_PLATFORM/AppWLocRootCA.cer"
+  cp "$SERVER_P12" "$SCRIPT_DIR/Resources/$RESOURCE_PLATFORM/AppWLocProxy.p12"
+  if [[ "$PLATFORM" == "ios" ]]; then
+    mkdir -p "$SCRIPT_DIR/Resources/Tunnel"
+    cp "$SERVER_P12" "$SCRIPT_DIR/Resources/Tunnel/AppWLocProxy.p12"
+  fi
+fi
+
+echo ""
+echo "生成完成："
+echo "  根证书 PEM：$ROOT_CERT_PEM"
+echo "  根证书 CER：$ROOT_CERT_CER"
+echo "  服务端证书：$SERVER_CERT"
+echo "  服务端中间私钥：$SERVER_KEY"
+echo "  扩展内置 p12：$SERVER_P12"
+echo "  p12 密码：$P12_PASSWORD"
+if [[ "$COPY_APP_RESOURCES" -eq 1 ]]; then
+  echo "  $PLATFORM 根证书和 p12 已同步到对应资源目录。"
+fi
+echo ""
+if [[ "$PLATFORM" == "ios" ]]; then
+  echo "手机端操作："
+  echo "  1. 把 $CERTIFICATE_BRAND Root CA 安装到 iPhone。"
+  echo "  2. 到“设置 -> 通用 -> 关于本机 -> 证书信任设置”里完全信任该根证书。"
+  echo "  3. p12 会随扩展内置，用户不需要手动导入。"
+else
+  echo "macOS 端操作："
+  echo "  1. 下载 $CERTIFICATE_BRAND 根证书后，打开“钥匙串访问”并选择左侧的“系统”钥匙串。"
+  echo "  2. 选择菜单“文件 -> 导入项目…”，手动导入根证书；不要双击证书直接安装。"
+  echo "  3. 在“系统”钥匙串中把该根证书设置为始终信任。"
+fi
+echo ""
+echo "注意：根证书私钥和服务端中间私钥都只用于生成证书，请不要提交、上传或外发。"
+echo "      运行时只需要内置代理 p12，不需要单独导入代理 key。"
