@@ -1,14 +1,9 @@
-name: build-ipa
+﻿name: build-ipa
 
-# Windows 上出未签名 IPA 的正路：借 GitHub 的 macOS runner 编。
-# 触发：仓库 → Actions → 左侧 build-ipa → Run workflow
+# Windows 涓婂嚭鏈鍚?IPA 鐨勬璺細鍊?GitHub 鐨?macOS runner 缂栥€?# 瑙﹀彂锛氫粨搴?鈫?Actions 鈫?宸︿晶 build-ipa 鈫?Run workflow
 #
-# 与旧 build.yml 的区别（旧的那个必然失败，别再跑）：
-#   1. 旧版没跑 generate_apple_wloc_p12.sh，Resources/iOS/AppWLocProxy.p12 等
-#      三个文件不存在，而 project.pbxproj 引用了它们 → Build input file cannot be found。
-#   2. 旧版用 macos-14，你的账号会被映射成付费大机型 → configuration not supported。
-#   3. 旧版没写 entitlements，TrollStore 装完 VPN 隧道是死的。
-
+# 涓庢棫 build.yml 鐨勫尯鍒紙鏃х殑閭ｄ釜蹇呯劧澶辫触锛屽埆鍐嶈窇锛夛細
+#   1. 鏃х増娌¤窇 generate_apple_wloc_p12.sh锛孯esources/iOS/AppWLocProxy.p12 绛?#      涓変釜鏂囦欢涓嶅瓨鍦紝鑰?project.pbxproj 寮曠敤浜嗗畠浠?鈫?Build input file cannot be found銆?#   2. 鏃х増鐢?macos-14锛屼綘鐨勮处鍙蜂細琚槧灏勬垚浠樿垂澶ф満鍨?鈫?configuration not supported銆?#   3. 鏃х増娌″啓 entitlements锛孴rollStore 瑁呭畬 VPN 闅ч亾鏄鐨勩€?
 on:
   workflow_dispatch:
   push:
@@ -18,16 +13,15 @@ on:
 
 jobs:
   build:
-    # macos-13 是免费额度里唯一稳定的 intel runner（macos-14/15 在部分账号上会报
-    # configuration not supported）。排队慢是常态，挂着等即可。
-    runs-on: macos-13
+    # macos-13 鏄厤璐归搴﹂噷鍞竴绋冲畾鐨?intel runner锛坢acos-14/15 鍦ㄩ儴鍒嗚处鍙蜂笂浼氭姤
+    # configuration not supported锛夈€傛帓闃熸參鏄父鎬侊紝鎸傜潃绛夊嵆鍙€?    runs-on: macos-15
     timeout-minutes: 90
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 环境自检
+      - name: 鐜鑷
         run: |
           set -x
           xcodebuild -version
@@ -36,13 +30,11 @@ jobs:
           openssl version
           sw_vers
 
-      - name: 生成代理证书（必须先跑，否则资源缺失编译失败）
-        run: |
+      - name: 鐢熸垚浠ｇ悊璇佷功锛堝繀椤诲厛璺戯紝鍚﹀垯璧勬簮缂哄け缂栬瘧澶辫触锛?        run: |
           set -euo pipefail
           chmod +x ./generate_apple_wloc_p12.sh
-          # 有 OpenSSL 3 就用它（3DES 需 -legacy）；没有就让系统 LibreSSL 上，
-          # 脚本内部已按能力探测降级。
-          if command -v brew >/dev/null 2>&1; then
+          # 鏈?OpenSSL 3 灏辩敤瀹冿紙3DES 闇€ -legacy锛夛紱娌℃湁灏辫绯荤粺 LibreSSL 涓婏紝
+          # 鑴氭湰鍐呴儴宸叉寜鑳藉姏鎺㈡祴闄嶇骇銆?          if command -v brew >/dev/null 2>&1; then
             if [ -x "$(brew --prefix openssl@3 2>/dev/null)/bin/openssl" ]; then
               export PATH="$(brew --prefix openssl@3)/bin:$PATH"
             fi
@@ -56,8 +48,7 @@ jobs:
           set -euo pipefail
           pod install --repo-update || pod install
 
-      - name: 编译（未签名）
-        run: |
+      - name: 缂栬瘧锛堟湭绛惧悕锛?        run: |
           set -o pipefail
           xcodebuild -workspace WLocApp.xcworkspace -scheme WLocApp-iOS \
             -configuration Release -sdk iphoneos -derivedDataPath build \
@@ -65,15 +56,14 @@ jobs:
             DEVELOPMENT_TEAM="" PROVISIONING_PROFILE_SPECIFIER="" \
             | tail -120
 
-      - name: 打 entitlements + 打 IPA
+      - name: 鎵?entitlements + 鎵?IPA
         run: |
           set -euo pipefail
           APP="$(ls -d build/Build/Products/Release-iphoneos/*.app | head -1)"
           echo "APP=$APP"
-          test -d "$APP/PlugIns/WLocTunnel-iOS.appex" || { echo "✗ 隧道扩展没编出来"; exit 1; }
+          test -d "$APP/PlugIns/WLocTunnel-iOS.appex" || { echo "鉁?闅ч亾鎵╁睍娌＄紪鍑烘潵"; exit 1; }
 
-          # TrollStore 需要 entitlements 真的写进 Mach-O，否则 VPN/隧道起不来
-          command -v ldid >/dev/null 2>&1 || brew install ldid
+          # TrollStore 闇€瑕?entitlements 鐪熺殑鍐欒繘 Mach-O锛屽惁鍒?VPN/闅ч亾璧蜂笉鏉?          command -v ldid >/dev/null 2>&1 || brew install ldid
           EXEC="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")"
           ldid -S"Resources/iOS/WLocApp-iOS.entitlements" "$APP/$EXEC"
           for APPEX in "$APP"/PlugIns/*.appex; do
@@ -91,7 +81,7 @@ jobs:
           /usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Info.plist"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist"
 
-      - name: 上传产物
+      - name: 涓婁紶浜х墿
         uses: actions/upload-artifact@v4
         with:
           name: wloc-ipa
