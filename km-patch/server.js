@@ -1296,6 +1296,10 @@ const server = http.createServer(async (req, res) => {
         buttons: (pop.buttons || []).filter((x) => x.enabled !== false),
         version: pop.version || null,
         accent: s.accent || '#2a5bff',
+        hb_interval: S().hbInterval || 30,
+        show_unbind: pop.showUnbind === undefined ? true : !!pop.showUnbind,
+        verify_timeout: Number(pop.verifyTimeout || 60),
+        proxy_check: !!pop.proxyCheck,
       }});
     }
 
