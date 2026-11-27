@@ -406,7 +406,7 @@ function pluginFileOf(app) {
 }
 
 function handlePlugin(req, res, q) {
-  const app = (S().apps || []).find((a) => a.appKey === q.appKey);
+  const app = (store.s.apps || []).find((a) => a.appKey === q.appKey);
   if (!app) return fail(res, 'APP_NOT_FOUND', '应用不存在');
   const p = app.plugin || {};
   const enabled = !!p.enabled && fs.existsSync(pluginFileOf(app));
@@ -420,7 +420,7 @@ function handlePlugin(req, res, q) {
 }
 
 function handlePluginFile(req, res, q) {
-  const app = (S().apps || []).find((a) => a.appKey === q.appKey);
+  const app = (store.s.apps || []).find((a) => a.appKey === q.appKey);
   if (!app || !app.plugin || !app.plugin.enabled) { res.writeHead(404); return res.end('not found'); }
   const file = pluginFileOf(app);
   fs.readFile(file, (e, buf) => {
@@ -435,14 +435,14 @@ function handlePluginFile(req, res, q) {
 }
 
 async function adminPluginGet(req, res, q, admin) {
-  const app = (S().apps || []).find((a) => String(a.id) === String(q.appId) || a.appKey === q.appKey);
+  const app = (store.s.apps || []).find((a) => String(a.id) === String(q.appId) || a.appKey === q.appKey);
   if (!app) return fail(res, 'APP_NOT_FOUND', '应用不存在');
   return ok(res, { data: { appId: app.id, appKey: app.appKey, name: app.name, plugin: app.plugin || null } });
 }
 
 async function adminPluginSave(req, res, admin) {
   const b = await readBody(req);
-  const app = (S().apps || []).find((a) => String(a.id) === String(b.appId) || a.appKey === b.appKey);
+  const app = (store.s.apps || []).find((a) => String(a.id) === String(b.appId) || a.appKey === b.appKey);
   if (!app) return fail(res, 'APP_NOT_FOUND', '应用不存在');
   app.plugin = Object.assign({ enabled: false, delay: 3, version: '1.0', size: 0 }, app.plugin || {});
   if (b.enabled !== undefined) app.plugin.enabled = !!b.enabled;
